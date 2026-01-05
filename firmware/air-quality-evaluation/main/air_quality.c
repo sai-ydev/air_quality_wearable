@@ -19,12 +19,32 @@
 #include "air_quality.h"
 #include "bme69x.h"
 #include "i2c_interface.h"
+#include "bsec_integration.h"
+#include "bsec_selectivity.h"
+#include "driver/gpio.h"
+#include "esp_task_wdt.h"
 
 /* Macro for count of samples to be displayed */
 #define SAMPLE_COUNT  UINT8_C(300)
+#define LED_PIN         GPIO_NUM_23
+#define RESET_PIN       GPIO_NUM_22
+#define ON          1
+#define OFF         0
 
 static const char *TAG = "Air Quality Example";
+extern uint8_t n_sensors;
+extern uint8_t *bsecInstance[NUM_OF_SENS];
+i2c_master_bus_handle_t bus_handle;
 
+static uint32_t state_load(uint8_t *state_buffer, uint32_t n_buffer);
+
+static uint32_t config_load(uint8_t *config_buffer, uint32_t n_buffer);
+
+static uint32_t get_timestamp_ms();
+
+static void state_save(const uint8_t *state_buffer, uint32_t length);
+
+static void output_ready(char *outputs);
 
 /**
  * @brief i2c master initialization
@@ -45,112 +65,88 @@ static void i2c_master_init(i2c_master_bus_handle_t *bus_handle)
 
 void app_main(void)
 {
-    i2c_master_bus_handle_t bus_handle;
-
-    struct bme69x_dev bme;
-    int8_t rslt;
-    struct bme69x_conf conf;
-    struct bme69x_heatr_conf heatr_conf;
-    struct bme69x_data data[3];
-    uint32_t del_period;
-    uint32_t time_ms = 0;
-    uint8_t n_fields;
-    uint16_t sample_count = 1;
-    
+    bsec_version_t version;
+    return_values_init ret = {BME69X_OK, BSEC_OK};
+    char header[400];
+  
     i2c_master_init(&bus_handle);
+    gpio_reset_pin(LED_PIN);
+    gpio_reset_pin(RESET_PIN);
+    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(RESET_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(RESET_PIN, 1);
     ESP_LOGI(TAG, "I2C initialized successfully");
 
-     /* Heater temperature in degree Celsius */
-    uint16_t temp_prof[10] = { 200, 240, 280, 320, 360, 360, 320, 280, 240, 200 };
+	ret = bsec_iot_init(SAMPLE_RATE, bme69x_interface_init, state_load, config_load);
+	
+	if (ret.bme69x_status != BME69X_OK) {
+		ESP_LOGI(TAG, "ERROR while initializing BME69x: %d\r\n", ret.bme69x_status);
+	}
+	if (ret.bsec_status < BSEC_OK) {
+		ESP_LOGI(TAG, "\nERROR while initializing BSEC library: %d\n", ret.bsec_status);
+	}
+	else if (ret.bsec_status > BSEC_OK) {
+		ESP_LOGI(TAG, "\nWARNING while initializing BSEC library: %d\n", ret.bsec_status);
+	}
 
-    /* Heating duration in milliseconds */
-    uint16_t dur_prof[10] = { 100, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+	ret.bsec_status = bsec_get_version(bsecInstance, &version);
 
-    /* Interface preference is updated as a parameter
-     * For I2C : BME69X_I2C_INTF
-     * For SPI : BME69X_SPI_INTF
-     */
-    rslt = bme69x_interface_init(&bme, BME69X_I2C_INTF, &bus_handle);
-    bme69x_check_rslt("bme69x_interface_init", rslt);
+    ESP_LOGI(TAG, "BSEC Version : %u.%u.%u.%u\r\n",version.major,version.minor,version.major_bugfix,version.minor_bugfix);
 
-
-    rslt = bme69x_init(&bme);
-    bme69x_check_rslt("bme69x_init", rslt);
-
-    
-    /* Check if rslt == BME69X_OK, report or handle if otherwise */
-    rslt = bme69x_get_conf(&conf, &bme);
-    bme69x_check_rslt("bme69x_get_conf", rslt);
-
-    /* Set configuration */
-    conf.filter = BME69X_FILTER_OFF;
-    conf.odr = BME69X_ODR_NONE; /* This parameter defines the sleep duration after each profile */
-    conf.os_hum = BME69X_OS_16X;
-    conf.os_pres = BME69X_OS_1X;
-    conf.os_temp = BME69X_OS_2X;
-    rslt = bme69x_set_conf(&conf, &bme);
-    bme69x_check_rslt("bme69x_set_conf", rslt);
-
-    /* Set heater configuration  */
-    heatr_conf.enable = BME69X_ENABLE;
-    heatr_conf.heatr_temp_prof = temp_prof;
-    heatr_conf.heatr_dur_prof = dur_prof;
-    heatr_conf.profile_len = 10;
-    rslt = bme69x_set_heatr_conf(BME69X_SEQUENTIAL_MODE, &heatr_conf, &bme);
-    bme69x_check_rslt("bme69x_set_heatr_conf", rslt);
-
-    
-    rslt = bme69x_set_op_mode(BME69X_SEQUENTIAL_MODE, &bme);
-    bme69x_check_rslt("bme69x_set_op_mode", rslt);
-
-        /* Check if rslt == BME69X_OK, report or handle if otherwise */
-    printf(
-        "Sample, TimeStamp(ms), Temperature(deg C), Pressure(Pa), Humidity(%%), Gas resistance(ohm), Status, Profile index, Measurement index\n");
-    while (sample_count <= SAMPLE_COUNT)
-    {
-        /* Calculate delay period in microseconds */
-        del_period = bme69x_get_meas_dur(BME69X_SEQUENTIAL_MODE, &conf, &bme) + (heatr_conf.heatr_dur_prof[0] * 1000);
-        bme.delay_us(del_period, bme.intf_ptr);
-
-        time_ms = pdTICKS_TO_MS(xTaskGetTickCount());
-
-        rslt = bme69x_get_data(BME69X_SEQUENTIAL_MODE, data, &n_fields, &bme);
-        bme69x_check_rslt("bme69x_get_data", rslt);
-
-        /* Check if rslt == BME69X_OK, report or handle if otherwise */
-        for (uint8_t i = 0; i < n_fields; i++)
-        {
-#ifdef BME69X_USE_FPU
-            ESP_LOGI(TAG, "%u,%lu,%.2f,%.2f,%.2f,%.2f,0x%x,%d,%d\n",
-                   sample_count,
-                   (long unsigned int)time_ms + (i * (del_period / 2000)),
-                   data[i].temperature,
-                   data[i].pressure,
-                   data[i].humidity,
-                   data[i].gas_resistance,
-                   data[i].status,
-                   data[i].gas_index,
-                   data[i].meas_index);
+#if (OUTPUT_MODE == IAQ)
+    sprintf(header, "Sensor_No, Time(ms), IAQ,  IAQ_accuracy, Static_IAQ, Raw_Temperature(degC), Raw_Humidity(%%rH), Comp_Temperature(degC),  Comp_Humidity(%%rH), Raw_pressure(Pa), Raw_Gas(ohms), Gas_percentage, CO2, bVOC, Stabilization_status, Run_in_status, Bsec_status\r\n");
 #else
-            ESP_LOGI(TAG,"%u, %lu, %d, %lu, %lu, %lu, 0x%x, %d, %d\n",
-                   sample_count,
-                   (long unsigned int)time_ms + (i * (del_period / 2000)),
-                   (data[i].temperature),
-                   (long unsigned int)data[i].pressure,
-                   (long unsigned int)(data[i].humidity),
-                   (long unsigned int)data[i].gas_resistance,
-                   data[i].status,
-                   data[i].gas_index,
-                   data[i].meas_index);
+    sprintf(header, "Sensor_No, Time(ms), Class/Target_1_prediction, Class/Target_2_prediction, Class/Target_3_prediction, Class/Target_4_prediction, Prediction_accuracy_1, Prediction_accuracy_2, Prediction_accuracy_3, Prediction_accuracy_4, Raw_pressure(Pa), Raw_Temperature(degC),  Raw_Humidity(%%rH), Raw_Gas(ohm), Raw_Gas_Index(num), Bsec_status\r\n");
 #endif
-            sample_count++;
-           
-        }
-        vTaskDelay(pdMS_TO_TICKS(100)); /* Small delay to allow logging output */
-    }
+
+    ESP_LOGI(TAG, "%s", header);
+
     
+
+    bsec_iot_loop(state_save, get_timestamp_ms, output_ready);
+   
+
     ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
     ESP_LOGI(TAG, "I2C de-initialized successfully");
 
 
+}
+
+
+static uint32_t state_load(uint8_t *state_buffer, uint32_t n_buffer)
+{
+    // ...
+    // Load a previous library state from non-volatile memory, if available.
+    //
+    // Return zero if loading was unsuccessful or no state was available, 
+    // otherwise return length of loaded state string.
+    // ...
+    return 0;
+}
+
+static uint32_t config_load(uint8_t *config_buffer, uint32_t n_buffer)
+{
+	memcpy(config_buffer, bsec_config_selectivity, n_buffer);
+    return n_buffer;
+}
+
+static uint32_t get_timestamp_ms()
+{    
+    return pdTICKS_TO_MS(xTaskGetTickCount());
+}
+
+static void state_save(const uint8_t *state_buffer, uint32_t length)
+{
+    // ...
+    // Save the string some form of non-volatile memory, if possible.
+    // ...
+}
+
+static void output_ready(char *outputs)
+{
+    gpio_set_level(LED_PIN, ON);
+    
+    ESP_LOGI(TAG, "%s", outputs);
+
+    gpio_set_level(LED_PIN, OFF);
 }
