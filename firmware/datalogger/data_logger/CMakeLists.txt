@@ -3,6 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(EXTRA_COMPONENT_DIRS components)
+set(CMAKE_OBJECT_PATH_MAX 500)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(data_logger)

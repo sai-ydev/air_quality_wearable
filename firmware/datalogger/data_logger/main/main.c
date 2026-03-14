@@ -6,6 +6,12 @@
 #include "driver/gpio.h"
 #include "logger_task.h"
 #include "serial_handler.h"
+#include "wifi_init.h"
+#include "http_server.h"
+#include "ml_inference.h"
+
+#define WIFI_SSID "YinYangHG"
+#define WIFI_PASSWORD "Sour2530Vinegar"
 
 static const char *TAG = "main";
 
@@ -37,10 +43,25 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     // Start serial handler task
-    /*ret = serial_handler_init();
-    ESP_ERROR_CHECK(ret);*/
+    ret = serial_handler_init();
+    ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "Initialization complete, entering main loop");
+
+    ret = wifi_init_sta(WIFI_SSID, WIFI_PASSWORD);
+    if(ret == ESP_OK){
+        vTaskDelay(pdMS_TO_TICKS(5000));  // Wait for WiFi to connect
+        http_server_init();
+        http_server_print_info();
+    }
+
+    ret = ml_inference_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ML inference initialization failed");
+        return;
+    } else{
+        ESP_LOGI(TAG, "ML inference initialized successfully");
+    }
     
     // Main loop: just consume queue and print
     sensor_reading_t reading;
