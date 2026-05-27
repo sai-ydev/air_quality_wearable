@@ -49,3 +49,6 @@ eagle.epf
 
 # file locks introduced since 7.x
 *.lck
+/GHTC/RP2350/RP2350-backups
+GHTC/RP2350/RP2350.kicad_sch-bak
+GHTC/RP2350/RP2350.kicad_sch-bak
